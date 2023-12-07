@@ -611,6 +611,8 @@ fn min(
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
         return cached;
+    } else if let Some(&cached) = cache.read().unwrap().get(&canon_state) {
+        return cached;
     }
     // Did P1 go out last turn? If so, the score for this position is twice the
     // sum (count) of P2's tiles
@@ -645,7 +647,6 @@ fn min(
         let mut cache = cache.write().unwrap();
         let lock_contention = last_cache_update.elapsed() - time_since_last_update;
         cache.extend(my_cache.drain());
-        my_cache.extend(cache.iter().map(|(&k, &v)| (k, v)));
         eprintln!(
             "Cache size after {:?}: {}",
             time_since_last_update,
@@ -669,6 +670,8 @@ fn max(
     debug_assert!(state.turn() == Turn::Player1);
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
+        return cached;
+    } else if let Some(&cached) = cache.read().unwrap().get(&canon_state) {
         return cached;
     }
     // Did P2 go out last turn? If so, the score for this position is twice the
@@ -704,7 +707,6 @@ fn max(
         let mut cache = cache.write().unwrap();
         let lock_contention = last_cache_update.elapsed() - time_since_last_update;
         cache.extend(my_cache.drain());
-        my_cache.extend(cache.iter().map(|(&k, &v)| (k, v)));
         eprintln!(
             "Cache size after {:?}: {}",
             time_since_last_update,
