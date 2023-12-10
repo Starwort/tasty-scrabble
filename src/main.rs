@@ -34,13 +34,21 @@ enum Direction {
 /// game), so we need 5 bits to represent the number of tiles in the bag -
 /// unfortunately this requires one extra bit for 16.
 ///
-/// This leaves us with 41 bits to represent the racks of the
-/// players; 3 bits each and 35 bits unused.
+/// Each player has a rack containing up to 7 tiles, so we allocate them 3 bits
+/// each.
+///
+/// After 6 passes in a row, the game will end in a tie. However, since the bag
+/// is entirely the same tile, there's never a reason for a player to play after
+/// passing unless the other player also played. Therefore, we can represent the
+/// pass counter with 2 bits - 00 for no passes, 01 for one pass, 10 for two
+/// passes, and 11 is unused because the game ends after two passes (because
+/// the players would simply pass out).
 ///
 /// The final memory layout therefore looks like this:
 /// T BBBBB (turn 1b, bag 5b)
 /// RRR RRR (player 1 rack 3b, player 2 rack 3b)
-/// ___________________________________ (unused 35b)
+/// PP (pass counter 2b)
+/// _________________________________ (unused 33b)
 /// MMMMMMMMM (row 1 9b)
 /// MMMMMMMMM (row 2 9b)
 /// MMMMMMMMM (row 3 9b)
@@ -60,6 +68,8 @@ struct Board {
     player1_rack: u3,
     #[bits(116..=118, rw)]
     player2_rack: u3,
+    #[bits(114..=115, rw)]
+    pass_counter: u2,
     #[bits(0..=80, rw)]
     board: u81,
 }
@@ -133,26 +143,33 @@ impl Board {
                     let next_rack_tiles = 7 - (used_tiles - tiles_left);
                     self.with_bag(u5::new(0u8))
                         .with_player1_rack(u3::new(next_rack_tiles))
-                        .with_turn(Turn::Player2)
                 } else {
                     self.with_bag(u5::new(tiles_left - used_tiles))
-                        .with_turn(Turn::Player2)
                 }
+                .with_turn(Turn::Player2)
             },
             Turn::Player2 => {
                 if used_tiles > tiles_left {
                     let next_rack_tiles = 7 - (used_tiles - tiles_left);
                     self.with_bag(u5::new(0u8))
                         .with_player2_rack(u3::new(next_rack_tiles))
-                        .with_turn(Turn::Player1)
                 } else {
                     self.with_bag(u5::new(tiles_left - used_tiles))
-                        .with_turn(Turn::Player1)
                 }
+                .with_turn(Turn::Player1)
             },
-        };
+        }
+        .with_pass_counter(u2::new(0));
         result.raw_value |= play_mask;
         result
+    }
+
+    pub fn pass(&self) -> Self {
+        match self.turn() {
+            Turn::Player1 => self.with_turn(Turn::Player2),
+            Turn::Player2 => self.with_turn(Turn::Player1),
+        }
+        .with_pass_counter(self.pass_counter() + u2::new(1))
     }
 
     /// Returns the score of the given play, or 0 if the play is invalid.
@@ -594,6 +611,7 @@ impl Board {
                     Some((self.make_move(i, dir), score))
                 }
             })
+            .chain([(self.pass(), 0)])
         })
     }
 }
@@ -608,6 +626,10 @@ fn min(
     mut beta: i8,
 ) -> i8 {
     debug_assert!(state.turn() == Turn::Player2);
+    if state.pass_counter() == u2::new(2) {
+        // Game is over
+        return 0;
+    }
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
         return cached;
@@ -624,7 +646,9 @@ fn min(
     let mut best = i8::MAX;
     let mut had_states = false;
     for (next_state, spread) in state.next_states() {
-        had_states = true;
+        if spread != 0 {
+            had_states = true;
+        }
         let score =
             max(cache, last_cache_update, my_cache, next_state, alpha, beta) + spread;
         if score < best {
@@ -668,6 +692,10 @@ fn max(
     beta: i8,
 ) -> i8 {
     debug_assert!(state.turn() == Turn::Player1);
+    if state.pass_counter() == u2::new(2) {
+        // Game is over
+        return 0;
+    }
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
         return cached;
