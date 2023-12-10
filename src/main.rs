@@ -1,12 +1,18 @@
+use std::cmp::Reverse;
 use std::fs::File;
 use std::iter::Extend;
-use std::sync::RwLock;
-use std::time::Instant;
+use std::mem;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use ahash::AHashMap;
+#[allow(clippy::wildcard_imports)]
 use arbitrary_int::*;
 use bitbybit::{bitenum, bitfield};
+use parking_lot::RwLock;
 use rayon::prelude::*;
+
+const CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, PartialEq, Eq)]
 #[bitenum(u1, exhaustive: true)]
@@ -616,15 +622,22 @@ impl Board {
     }
 }
 
-#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
 fn min(
     cache: &RwLock<AHashMap<u128, i8>>,
+    previous_cache: &AHashMap<u128, i8>,
     last_cache_update: &mut Instant,
     my_cache: &mut AHashMap<u128, i8>,
     state: Board,
     alpha: i8,
     mut beta: i8,
+    max_depth: usize,
+    exhausted: &mut bool,
 ) -> i8 {
+    if max_depth == 0 {
+        *exhausted = false;
+        return 0;
+    }
     debug_assert!(state.turn() == Turn::Player2);
     if state.pass_counter() == u2::new(2) {
         // Game is over
@@ -633,7 +646,7 @@ fn min(
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
         return cached;
-    } else if let Some(&cached) = cache.read().unwrap().get(&canon_state) {
+    } else if let Some(&cached) = cache.read().get(&canon_state) {
         return cached;
     }
     // Did P1 go out last turn? If so, the score for this position is twice the
@@ -645,12 +658,30 @@ fn min(
     }
     let mut best = i8::MAX;
     let mut had_states = false;
-    for (next_state, spread) in state.next_states() {
+    let mut next_states = state.next_states().collect::<Vec<_>>();
+    next_states.sort_by_key(|&(ref state, spread)| {
+        previous_cache
+            .get(&state.canonicalise())
+            .copied()
+            .unwrap_or(spread)
+    });
+    for (next_state, spread) in next_states {
         if spread != 0 {
+            // not a pass - we don't care if 'pass' is a valid move
+            // because pass is *always* a valid move
             had_states = true;
         }
-        let score =
-            max(cache, last_cache_update, my_cache, next_state, alpha, beta) + spread;
+        let score = max(
+            cache,
+            previous_cache,
+            last_cache_update,
+            my_cache,
+            next_state,
+            alpha,
+            beta,
+            max_depth,
+            exhausted,
+        ) + spread;
         if score < best {
             best = score;
             if best < beta {
@@ -662,13 +693,13 @@ fn min(
         }
     }
     if !had_states {
-        // No possible moves left - it's a tie
+        // No possible (non-pass) moves left - it's a tie
         best = 0;
     }
     my_cache.insert(canon_state, best);
     let time_since_last_update = last_cache_update.elapsed();
-    if time_since_last_update.as_secs() > 30 {
-        let mut cache = cache.write().unwrap();
+    if time_since_last_update > CACHE_SYNC_INTERVAL {
+        let mut cache = cache.write();
         let lock_contention = last_cache_update.elapsed() - time_since_last_update;
         cache.extend(my_cache.drain());
         eprintln!(
@@ -682,14 +713,17 @@ fn min(
     best
 }
 
-#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
 fn max(
     cache: &RwLock<AHashMap<u128, i8>>,
+    previous_cache: &AHashMap<u128, i8>,
     last_cache_update: &mut Instant,
     my_cache: &mut AHashMap<u128, i8>,
     state: Board,
     mut alpha: i8,
     beta: i8,
+    max_depth: usize,
+    exhausted: &mut bool,
 ) -> i8 {
     debug_assert!(state.turn() == Turn::Player1);
     if state.pass_counter() == u2::new(2) {
@@ -699,7 +733,7 @@ fn max(
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
         return cached;
-    } else if let Some(&cached) = cache.read().unwrap().get(&canon_state) {
+    } else if let Some(&cached) = cache.read().get(&canon_state) {
         return cached;
     }
     // Did P2 go out last turn? If so, the score for this position is twice the
@@ -711,10 +745,32 @@ fn max(
     }
     let mut best = i8::MIN;
     let mut had_states = false;
-    for (next_state, spread) in state.next_states() {
-        had_states = true;
-        let score =
-            min(cache, last_cache_update, my_cache, next_state, alpha, beta) + spread;
+    let mut next_states = state.next_states().collect::<Vec<_>>();
+    next_states.sort_by_key(|&(ref state, spread)| {
+        Reverse(
+            previous_cache
+                .get(&state.canonicalise())
+                .copied()
+                .unwrap_or(spread),
+        )
+    });
+    for (next_state, spread) in next_states {
+        if spread != 0 {
+            // not a pass - we don't care if 'pass' is a valid move
+            // because pass is *always* a valid move
+            had_states = true;
+        }
+        let score = min(
+            cache,
+            previous_cache,
+            last_cache_update,
+            my_cache,
+            next_state,
+            alpha,
+            beta,
+            max_depth - 1,
+            exhausted,
+        ) + spread;
         if score > best {
             best = score;
             if best > alpha {
@@ -726,13 +782,13 @@ fn max(
         }
     }
     if !had_states {
-        // No possible moves left - it's a tie
+        // No possible (non-pass) moves left - it's a tie
         best = 0;
     }
     my_cache.insert(canon_state, best);
     let time_since_last_update = last_cache_update.elapsed();
-    if time_since_last_update.as_secs() > 30 {
-        let mut cache = cache.write().unwrap();
+    if time_since_last_update > CACHE_SYNC_INTERVAL {
+        let mut cache = cache.write();
         let lock_contention = last_cache_update.elapsed() - time_since_last_update;
         cache.extend(my_cache.drain());
         eprintln!(
@@ -750,37 +806,60 @@ fn main() {
     // state -> best possible spread for the current player over the rest of the
     // game
     let cache = RwLock::new(AHashMap::<u128, i8>::new());
+    let mut previous_cache = AHashMap::<u128, i8>::new();
+    let exhausted = AtomicBool::new(true);
     let game = Board::new();
-    game.next_states()
-        .collect::<Vec<_>>()
-        .into_par_iter()
-        .for_each(|(next_state, spread)| {
-            debug_assert_ne!(next_state.board().count_ones(), 0);
-            let mut last_cache_update = Instant::now();
-            let mut my_cache = cache.read().unwrap().clone();
-            let score = min(
-                &cache,
-                &mut last_cache_update,
-                &mut my_cache,
-                next_state,
-                i8::MIN,
-                i8::MAX,
-            ) + spread;
-            my_cache.insert(next_state.canonicalise(), score);
-            cache.write().unwrap().extend(my_cache);
-        });
-    let mut my_cache = cache.read().unwrap().clone();
+    for max_depth in 2.. {
+        let max_depth = max_depth * 5;
+        exhausted.store(true, Ordering::Relaxed);
+        {
+            let mut cache = cache.write();
+            mem::swap(&mut previous_cache, &mut *cache);
+            cache.clear();
+        }
+        game.next_states()
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .for_each(|(next_state, spread)| {
+                assert_ne!(next_state.board().count_ones(), 0);
+                let mut my_exhausted = true;
+                let mut last_cache_update = Instant::now();
+                let mut my_cache = AHashMap::<u128, i8>::new();
+                let score = min(
+                    &cache,
+                    &previous_cache,
+                    &mut last_cache_update,
+                    &mut my_cache,
+                    next_state,
+                    i8::MIN,
+                    i8::MAX,
+                    max_depth,
+                    &mut my_exhausted,
+                ) + spread;
+                my_cache.insert(next_state.canonicalise(), score);
+                cache.write().extend(my_cache);
+                exhausted.fetch_and(my_exhausted, Ordering::Relaxed);
+            });
+    }
+    let mut my_cache = cache.read().clone();
+    let previous_cache = my_cache.clone();
+    let mut exhausted = true;
     let overall_spread = max(
         &cache,
+        &previous_cache,
         &mut Instant::now(),
         &mut my_cache,
         game,
         i8::MIN,
         i8::MAX,
+        10,
+        &mut exhausted,
     );
-    let mut cache = cache.into_inner().unwrap();
+    let mut cache = cache.into_inner();
     cache.extend(my_cache);
     println!("Forced spread: {overall_spread}");
     let results = File::create("results.json").unwrap();
     serde_json::to_writer(results, &cache).unwrap();
+    assert!(exhausted); // still write the results even if this somehow fails,
+                        // but *do* report it
 }

@@ -9,5 +9,6 @@ edition = "2021"
 ahash = { version = "0.8.6", features = ["serde"] }
 arbitrary-int = "1.2.6"
 bitbybit = "1.2.2"
+parking_lot = "0.12.1"
 rayon = "1.8.0"
 serde_json = "1.0.108"
