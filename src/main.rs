@@ -12,7 +12,7 @@ use bitbybit::{bitenum, bitfield};
 use parking_lot::RwLock;
 use rayon::prelude::*;
 
-const CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(5);
+const CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(15);
 
 #[derive(Debug, PartialEq, Eq)]
 #[bitenum(u1, exhaustive: true)]
@@ -679,7 +679,7 @@ fn min(
             next_state,
             alpha,
             beta,
-            max_depth,
+            max_depth - 1,
             exhausted,
         ) + spread;
         if score < best {
@@ -725,6 +725,10 @@ fn max(
     max_depth: usize,
     exhausted: &mut bool,
 ) -> i8 {
+    if max_depth == 0 {
+        *exhausted = false;
+        return 0;
+    }
     debug_assert!(state.turn() == Turn::Player1);
     if state.pass_counter() == u2::new(2) {
         // Game is over
@@ -809,8 +813,7 @@ fn main() {
     let mut previous_cache = AHashMap::<u128, i8>::new();
     let exhausted = AtomicBool::new(true);
     let game = Board::new();
-    for max_depth in 2.. {
-        let max_depth = max_depth * 5;
+    for max_depth in 5.. {
         exhausted.store(true, Ordering::Relaxed);
         {
             let mut cache = cache.write();
@@ -821,7 +824,7 @@ fn main() {
             .collect::<Vec<_>>()
             .into_par_iter()
             .for_each(|(next_state, spread)| {
-                assert_ne!(next_state.board().count_ones(), 0);
+                // assert_ne!(next_state.board().count_ones(), 0);
                 let mut my_exhausted = true;
                 let mut last_cache_update = Instant::now();
                 let mut my_cache = AHashMap::<u128, i8>::new();
@@ -840,6 +843,11 @@ fn main() {
                 cache.write().extend(my_cache);
                 exhausted.fetch_and(my_exhausted, Ordering::Relaxed);
             });
+
+        println!("-------- Depth {max_depth} complete --------");
+        println!("Cache size: {}", cache.read().len());
+        println!("Exhausted: {}", exhausted.load(Ordering::Relaxed));
+        println!("----------------------------------");
     }
     let mut my_cache = cache.read().clone();
     let previous_cache = my_cache.clone();
