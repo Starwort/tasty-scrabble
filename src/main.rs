@@ -180,7 +180,7 @@ impl Board {
 
     /// Returns the score of the given play, or 0 if the play is invalid.
     #[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
-    pub fn score(&self, start: u8, direction: Direction) -> i8 {
+    pub fn score(&self, start: u8, direction: Direction) -> SpreadType {
         let (y, x) = (start / 9, start % 9);
         match (x, y, direction) {
             (_, 7 | 8, Direction::Vertical)
@@ -242,8 +242,11 @@ impl Board {
                     // not bothering to count the value of the M tile, as every tile is
                     // an M
                     let mut score = 3;
-                    score += (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as i8;
-                    score += 2 * (bonus_mask & Self::TRIPLE_LETTERS).count_ones() as i8;
+                    score +=
+                        (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as SpreadType;
+                    score += 2
+                        * (bonus_mask & Self::TRIPLE_LETTERS).count_ones()
+                            as SpreadType;
                     for _ in 0..(bonus_mask & Self::DOUBLE_WORDS).count_ones() {
                         score *= 2;
                     }
@@ -335,8 +338,11 @@ impl Board {
                     // not bothering to count the value of the M tile, as every tile is
                     // an M
                     let mut score = 2;
-                    score += (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as i8;
-                    score += 2 * (bonus_mask & Self::TRIPLE_LETTERS).count_ones() as i8;
+                    score +=
+                        (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as SpreadType;
+                    score += 2
+                        * (bonus_mask & Self::TRIPLE_LETTERS).count_ones()
+                            as SpreadType;
                     for _ in 0..(bonus_mask & Self::DOUBLE_WORDS).count_ones() {
                         score *= 2;
                     }
@@ -436,8 +442,11 @@ impl Board {
                     // not bothering to count the value of the M tile, as every tile is
                     // an M
                     let mut score = 3;
-                    score += (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as i8;
-                    score += 2 * (bonus_mask & Self::TRIPLE_LETTERS).count_ones() as i8;
+                    score +=
+                        (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as SpreadType;
+                    score += 2
+                        * (bonus_mask & Self::TRIPLE_LETTERS).count_ones()
+                            as SpreadType;
                     for _ in 0..(bonus_mask & Self::DOUBLE_WORDS).count_ones() {
                         score *= 2;
                     }
@@ -536,8 +545,11 @@ impl Board {
                     // not bothering to count the value of the M tile, as every tile is
                     // an M
                     let mut score = 2;
-                    score += (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as i8;
-                    score += 2 * (bonus_mask & Self::TRIPLE_LETTERS).count_ones() as i8;
+                    score +=
+                        (bonus_mask & Self::DOUBLE_LETTERS).count_ones() as SpreadType;
+                    score += 2
+                        * (bonus_mask & Self::TRIPLE_LETTERS).count_ones()
+                            as SpreadType;
                     for _ in 0..(bonus_mask & Self::DOUBLE_WORDS).count_ones() {
                         score *= 2;
                     }
@@ -597,7 +609,7 @@ impl Board {
         }
     }
 
-    pub fn next_states(&self) -> impl Iterator<Item = (Self, i8)> + '_ {
+    pub fn next_states(&self) -> impl Iterator<Item = (Self, SpreadType)> + '_ {
         (0..81).flat_map(move |i| {
             [
                 Direction::Horizontal,
@@ -624,24 +636,24 @@ impl Board {
 
 #[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
 fn min(
-    cache: &RwLock<AHashMap<u128, i8>>,
-    previous_cache: &AHashMap<u128, i8>,
+    cache: &RwLock<AHashMap<u128, Option<SpreadType>>>,
+    previous_cache: &AHashMap<u128, Option<SpreadType>>,
     last_cache_update: &mut Instant,
-    my_cache: &mut AHashMap<u128, i8>,
+    my_cache: &mut AHashMap<u128, Option<SpreadType>>,
     state: Board,
-    alpha: i8,
-    mut beta: i8,
+    alpha: SpreadType,
+    mut beta: SpreadType,
     max_depth: usize,
     exhausted: &mut bool,
-) -> i8 {
+) -> Option<SpreadType> {
     if max_depth == 0 {
         *exhausted = false;
-        return 0;
+        return Some(0);
     }
     debug_assert!(state.turn() == Turn::Player2);
     if state.pass_counter() == u2::new(2) {
         // Game is over
-        return 0;
+        return Some(0);
     }
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
@@ -652,18 +664,22 @@ fn min(
     // Did P1 go out last turn? If so, the score for this position is twice the
     // sum (count) of P2's tiles
     if state.player1_rack() == u3::new(0u8) {
-        let score = u8::from(state.player2_rack()) as i8 * 2;
+        let score = Some(u8::from(state.player2_rack()) as SpreadType * 2);
         my_cache.insert(canon_state, score);
         return score;
     }
-    let mut best = i8::MAX;
+    // claim this state for this thread
+    cache.write().insert(canon_state, None);
+    let mut best = SpreadType::MAX;
     let mut had_states = false;
     let mut next_states = state.next_states().collect::<Vec<_>>();
     next_states.sort_by_key(|&(ref state, spread)| {
         previous_cache
             .get(&state.canonicalise())
             .copied()
-            .unwrap_or(spread)
+            .map_or(spread, |val| {
+                val.expect("Should always exist when present in the previous cache")
+            })
     });
     for (next_state, spread) in next_states {
         if spread != 0 {
@@ -671,7 +687,7 @@ fn min(
             // because pass is *always* a valid move
             had_states = true;
         }
-        let score = max(
+        if let Some(branch_score) = max(
             cache,
             previous_cache,
             last_cache_update,
@@ -681,13 +697,15 @@ fn min(
             beta,
             max_depth - 1,
             exhausted,
-        ) + spread;
-        if score < best {
-            best = score;
-            if best < beta {
-                beta = best;
-                if beta <= alpha {
-                    break;
+        ) {
+            let score = branch_score + spread;
+            if score < best {
+                best = score;
+                if best < beta {
+                    beta = best;
+                    if beta <= alpha {
+                        break;
+                    }
                 }
             }
         }
@@ -696,7 +714,7 @@ fn min(
         // No possible (non-pass) moves left - it's a tie
         best = 0;
     }
-    my_cache.insert(canon_state, best);
+    my_cache.insert(canon_state, Some(best));
     let time_since_last_update = last_cache_update.elapsed();
     if time_since_last_update > CACHE_SYNC_INTERVAL {
         let mut cache = cache.write();
@@ -710,29 +728,29 @@ fn min(
         eprintln!("Lock contention: {lock_contention:?}");
         *last_cache_update = Instant::now();
     }
-    best
+    Some(best)
 }
 
 #[allow(clippy::cast_possible_wrap, clippy::too_many_arguments)]
 fn max(
-    cache: &RwLock<AHashMap<u128, i8>>,
-    previous_cache: &AHashMap<u128, i8>,
+    cache: &RwLock<AHashMap<u128, Option<SpreadType>>>,
+    previous_cache: &AHashMap<u128, Option<SpreadType>>,
     last_cache_update: &mut Instant,
-    my_cache: &mut AHashMap<u128, i8>,
+    my_cache: &mut AHashMap<u128, Option<SpreadType>>,
     state: Board,
-    mut alpha: i8,
-    beta: i8,
+    mut alpha: SpreadType,
+    beta: SpreadType,
     max_depth: usize,
     exhausted: &mut bool,
-) -> i8 {
+) -> Option<SpreadType> {
     if max_depth == 0 {
         *exhausted = false;
-        return 0;
+        return Some(0);
     }
     debug_assert!(state.turn() == Turn::Player1);
     if state.pass_counter() == u2::new(2) {
         // Game is over
-        return 0;
+        return Some(0);
     }
     let canon_state = state.canonicalise();
     if let Some(&cached) = my_cache.get(&canon_state) {
@@ -743,11 +761,13 @@ fn max(
     // Did P2 go out last turn? If so, the score for this position is twice the
     // sum (count) of P1's tiles
     if state.player2_rack() == u3::new(0u8) {
-        let score = -(u8::from(state.player1_rack()) as i8) * 2;
+        let score = Some(-(u8::from(state.player1_rack()) as SpreadType) * 2);
         my_cache.insert(canon_state, score);
         return score;
     }
-    let mut best = i8::MIN;
+    // claim this state for this thread
+    cache.write().insert(canon_state, None);
+    let mut best = SpreadType::MIN;
     let mut had_states = false;
     let mut next_states = state.next_states().collect::<Vec<_>>();
     next_states.sort_by_key(|&(ref state, spread)| {
@@ -755,7 +775,9 @@ fn max(
             previous_cache
                 .get(&state.canonicalise())
                 .copied()
-                .unwrap_or(spread),
+                .map_or(spread, |val| {
+                    val.expect("Should always exist when present in the previous cache")
+                }),
         )
     });
     for (next_state, spread) in next_states {
@@ -764,7 +786,7 @@ fn max(
             // because pass is *always* a valid move
             had_states = true;
         }
-        let score = min(
+        if let Some(branch_score) = min(
             cache,
             previous_cache,
             last_cache_update,
@@ -774,13 +796,15 @@ fn max(
             beta,
             max_depth - 1,
             exhausted,
-        ) + spread;
-        if score > best {
-            best = score;
-            if best > alpha {
-                alpha = best;
-                if beta <= alpha {
-                    break;
+        ) {
+            let score = branch_score + spread;
+            if score > best {
+                best = score;
+                if best > alpha {
+                    alpha = best;
+                    if beta <= alpha {
+                        break;
+                    }
                 }
             }
         }
@@ -789,12 +813,15 @@ fn max(
         // No possible (non-pass) moves left - it's a tie
         best = 0;
     }
-    my_cache.insert(canon_state, best);
+    my_cache.insert(canon_state, Some(best));
     let time_since_last_update = last_cache_update.elapsed();
     if time_since_last_update > CACHE_SYNC_INTERVAL {
         let mut cache = cache.write();
         let lock_contention = last_cache_update.elapsed() - time_since_last_update;
-        cache.extend(my_cache.drain());
+        cache.extend(my_cache.drain().map(|(k, v)| {
+            assert!(v.is_some());
+            (k, v)
+        }));
         eprintln!(
             "Cache size after {:?}: {}",
             time_since_last_update,
@@ -803,14 +830,16 @@ fn max(
         eprintln!("Lock contention: {lock_contention:?}");
         *last_cache_update = Instant::now();
     }
-    best
+    Some(best)
 }
+
+type SpreadType = i16;
 
 fn main() {
     // state -> best possible spread for the current player over the rest of the
     // game
-    let cache = RwLock::new(AHashMap::<u128, i8>::new());
-    let mut previous_cache = AHashMap::<u128, i8>::new();
+    let cache = RwLock::new(AHashMap::<u128, Option<SpreadType>>::new());
+    let mut previous_cache = AHashMap::<u128, Option<SpreadType>>::new();
     let exhausted = AtomicBool::new(true);
     let game = Board::new();
     for max_depth in 5.. {
@@ -827,19 +856,21 @@ fn main() {
                 // assert_ne!(next_state.board().count_ones(), 0);
                 let mut my_exhausted = true;
                 let mut last_cache_update = Instant::now();
-                let mut my_cache = AHashMap::<u128, i8>::new();
-                let score = min(
+                let mut my_cache = AHashMap::<u128, Option<SpreadType>>::new();
+                if let Some(branch_score) = min(
                     &cache,
                     &previous_cache,
                     &mut last_cache_update,
                     &mut my_cache,
                     next_state,
-                    i8::MIN,
-                    i8::MAX,
+                    SpreadType::MIN,
+                    SpreadType::MAX,
                     max_depth,
                     &mut my_exhausted,
-                ) + spread;
-                my_cache.insert(next_state.canonicalise(), score);
+                ) {
+                    let score = branch_score + spread;
+                    my_cache.insert(next_state.canonicalise(), Some(score));
+                }
                 cache.write().extend(my_cache);
                 exhausted.fetch_and(my_exhausted, Ordering::Relaxed);
             });
@@ -858,16 +889,18 @@ fn main() {
         &mut Instant::now(),
         &mut my_cache,
         game,
-        i8::MIN,
-        i8::MAX,
+        SpreadType::MIN,
+        SpreadType::MAX,
         10,
         &mut exhausted,
-    );
+    )
+    .unwrap();
     let mut cache = cache.into_inner();
     cache.extend(my_cache);
     println!("Forced spread: {overall_spread}");
     let results = File::create("results.json").unwrap();
     serde_json::to_writer(results, &cache).unwrap();
-    assert!(exhausted); // still write the results even if this somehow fails,
-                        // but *do* report it
+    // still write the results even if these somehow fail, but *do* report it
+    assert!(!cache.values().any(|&x| x.is_none()));
+    assert!(exhausted);
 }
