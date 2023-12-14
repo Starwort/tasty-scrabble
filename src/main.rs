@@ -1,9 +1,9 @@
 use std::cmp::Reverse;
 use std::fs::File;
 use std::iter::Extend;
-use std::mem;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use std::{fs, mem};
 
 use ahash::AHashMap;
 #[allow(clippy::wildcard_imports)]
@@ -664,6 +664,7 @@ fn min(
     // Did P1 go out last turn? If so, the score for this position is twice the
     // sum (count) of P2's tiles
     if state.player1_rack() == u3::new(0u8) {
+        #[allow(clippy::cast_lossless)]
         let score = Some(u8::from(state.player2_rack()) as SpreadType * 2);
         my_cache.insert(canon_state, score);
         return score;
@@ -761,6 +762,7 @@ fn max(
     // Did P2 go out last turn? If so, the score for this position is twice the
     // sum (count) of P1's tiles
     if state.player2_rack() == u3::new(0u8) {
+        #[allow(clippy::cast_lossless)]
         let score = Some(-(u8::from(state.player1_rack()) as SpreadType) * 2);
         my_cache.insert(canon_state, score);
         return score;
@@ -842,7 +844,35 @@ fn main() {
     let mut previous_cache = AHashMap::<u128, Option<SpreadType>>::new();
     let exhausted = AtomicBool::new(true);
     let game = Board::new();
-    for max_depth in 5.. {
+    let mut available_cached_results = fs::read_dir(".")
+        .unwrap()
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .and_then(|entry| entry.file_name().into_string().ok())
+        })
+        .filter_map(|name| {
+            #[allow(clippy::case_sensitive_file_extension_comparisons)]
+            if name.starts_with("results_") && name.ends_with(".json") {
+                let number = name[8..name.len() - 5].parse::<usize>().ok()?;
+                Some((number, name))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    available_cached_results.sort_unstable_by_key(|&(number, _)| number);
+    let (start_max_depth, start_cache) = available_cached_results
+        .last()
+        .map_or((5, None), |(number, name)| (*number, Some(name.as_str())));
+    if let Some(name) = start_cache {
+        let results = File::open(name).unwrap();
+        let results: AHashMap<u128, SpreadType> =
+            serde_json::from_reader(results).unwrap();
+        previous_cache.extend(results.into_iter().map(|(k, v)| (k, Some(v))));
+        println!("Loaded {} results from {}", previous_cache.len(), name);
+    }
+    for max_depth in start_max_depth.. {
         exhausted.store(true, Ordering::Relaxed);
         {
             let mut cache = cache.write();
@@ -879,6 +909,11 @@ fn main() {
         println!("Cache size: {}", cache.read().len());
         println!("Exhausted: {}", exhausted.load(Ordering::Relaxed));
         println!("----------------------------------");
+        let write_start = Instant::now();
+        let results = File::create(format!("results_{max_depth}.json")).unwrap();
+        serde_json::to_writer(results, &*cache.read()).unwrap();
+        let write_time = write_start.elapsed();
+        println!("Wrote results for {max_depth} in {write_time:?}");
     }
     let mut my_cache = cache.read().clone();
     let previous_cache = my_cache.clone();
