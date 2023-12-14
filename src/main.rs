@@ -864,7 +864,9 @@ fn main() {
     available_cached_results.sort_unstable_by_key(|&(number, _)| number);
     let (start_max_depth, start_cache) = available_cached_results
         .last()
-        .map_or((5, None), |(number, name)| (*number, Some(name.as_str())));
+        .map_or((5, None), |(number, name)| {
+            (*number + 1, Some(name.as_str()))
+        });
     if let Some(name) = start_cache {
         let results = File::open(name).unwrap();
         let results: AHashMap<u128, SpreadType> =
