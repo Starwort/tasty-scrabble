@@ -12,7 +12,7 @@ use bitbybit::{bitenum, bitfield};
 use parking_lot::RwLock;
 use rayon::prelude::*;
 
-const CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(15);
+const CACHE_SYNC_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, PartialEq, Eq)]
 #[bitenum(u1, exhaustive: true)]
